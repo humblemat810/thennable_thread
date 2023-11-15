@@ -1,7 +1,7 @@
 from threading import Thread, Event
 import traceback, inspect
 class ThreadWithReturnValue(Thread):
-    end_event = Event()
+    
     
     def end_event_decorator(end_event):
         def end_event_decorator_inner(func):
@@ -15,6 +15,7 @@ class ThreadWithReturnValue(Thread):
     
     def __init__(self, group=None, target=None, name=None,
                  args=(), kwargs={}):
+        self.end_event = Event()
         super().__init__(group, target, name, args, kwargs)
         self._return = None
         
@@ -258,13 +259,6 @@ if __name__ == "__main__":
     # Promise(thennable_thread(target=f), args = [])
     #thth2.when([f]).done(h)
 
-    def prom_test():
-        prom = when([f])
-        prom.th.end_event.wait()
-        print(prom.th.end_event.is_set())
-        print(type(prom))
-        
-        prom.done(g)
     
     thth1 = thennable_thread(target = g)
     thth2 = thth1.then(g)
