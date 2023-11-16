@@ -66,19 +66,22 @@ class thennable_thread(ThreadWithReturnValue):
     
     
     
-    def __init__(self, *arg, thennable = False, **kwarg):
+    def __init__(self, *arg, is_promise = False, **kwarg):
         super().__init__(*arg, **kwarg)
         self.promise_resolved_event = Event()
         self.error_event = Event()
-        self.chainnable = True
+        self.execution_sequence_chainnable = True
+        self.result_chainable = True
         self.auto_fullfull = True
-        self.thennable = thennable
+        self.thennable = True
         self.mutex = Lock()
         self.state = "pending"
         self._error = None
         self.th_wait_end = None
         self.resolve_value = None
         self.reject_reason = None
+        self.is_promise = False
+        self.resolve_pred : thennable_thread= None
     def resolve(self, value):
         if self.state == "pending":
             self.state = 'fullfilled'
@@ -108,41 +111,58 @@ class thennable_thread(ThreadWithReturnValue):
         except Exception as e:
             self.reject(e)
         
-    
-        
     def done(self, other):
-        return self.then(other)
-        
-    def then(self, other : "function", args = None, chainnable=None, kwarg = None):
-        if args is None and kwarg is None:
+        return self.then(other, result_chainable = True, execution_sequence_chainnable=True, args = self._return)
+
+    def then(self, other : "function", args = None, execution_sequence_chainnable=True, result_chainable = True, kwargs = None):
+        if args is None and kwargs is None:
             args = []
-        th_other = thennable_thread(target=other, args=args, kwargs=kwarg )
-        if self.chainnable:
+        th_other = thennable_thread(target=other, args=args, kwargs=kwargs )
+        if self.execution_sequence_chainnable:
+            
             self.children.append(th_other)
-        if chainnable is None:
-            th_other.chainnable = self.chainnable
+            with self.mutex:
+                if len(self.children) == 1:
+                    th_other.resolve_pred = self
+                else:
+                    th_other.resolve_pred = self
+                    th_other.resolve_pred = self.children[-2]
+        if execution_sequence_chainnable is None:
+            th_other.execution_sequence_chainnable = self.execution_sequence_chainnable
         else:
-            th_other.chainnable = chainnable
-        if th_other.chainnable:
+            th_other.execution_sequence_chainnable = execution_sequence_chainnable
+        if result_chainable is None:
+            th_other.result_chainable = self.result_chainable
+        else:
+            th_other.result_chainable = result_chainable
+            
+        if th_other.execution_sequence_chainnable:
             th_other.parent = self
         
         def await_start_next(last_th: "thennable_thread", next_th: "thennable_thread"):
-            if last_th is not None:
-                last_th.end_event.wait()
-            if last_th.state == 'rejected':
+            
+            if self.is_promise:
+                self.resolve_pred.promise_resolved_event.wait() # wait for siblings
                 last_th.promise_resolved_event.wait()
+            else:
+                last_th.end_event.wait()
+            if last_th.state == 'rejected':    
                 with next_th.mutex:
                     if next_th.state == "pending":
                         next_th.reject(last_th.reject_reason)
                         next_th._error = last_th._error
                         next_th.end_event.set()
             else:   
-                if last_th is not None:
-                    next_th._args = [last_th._return] + next_th._args
-                else:
-                    #may behave insert none here
-                    # nothing indicate it has no result no parent
-                    pass
+                if last_th.result_chainable and next_th.result_chainable:
+                    if last_th is not None:
+                        if next_th._args is None:
+                            next_th._args = [last_th._return]
+                        else:
+                            next_th._args = [last_th._return] + next_th._args
+                    else:
+                        #may behave insert none here
+                        # nothing indicate it has no result no parent
+                        pass
                 if next_th._started.is_set():
                     pass
                 else:
@@ -152,22 +172,30 @@ class thennable_thread(ThreadWithReturnValue):
         self.wsh_th = wsn_th
 
         return th_other
-    def catch(self, other, chainnable = None):
+    def catch(self, other, execution_sequence_chainnable=True, result_chainable = True):
         args = [self._error]
         th_other = thennable_thread(target=other, args=args )
-        if self.chainnable:
+        if self.execution_sequence_chainnable:
             self.children.append(th_other)
-        if chainnable is None:
-            th_other.chainnable = self.chainnable
+        if execution_sequence_chainnable is None:
+            th_other.execution_sequence_chainnable = self.execution_sequence_chainnable
         else:
-            th_other.chainnable = chainnable
-        if th_other.chainnable:
+            th_other.execution_sequence_chainnable = execution_sequence_chainnable
+        if th_other.execution_sequence_chainnable:
             th_other.parent = self
+        if result_chainable is None:
+            th_other.result_chainable = self.result_chainable
+        else:
+            th_other.result_chainable = result_chainable
+
         
         def await_start_next(last_th: "thennable_thread", next_th: "thennable_thread"):
-            if last_th is not None:
+            
+            if self.is_promise:
+                self.resolve_pred.promise_resolved_event.wait() # wait for siblings
+                last_th.promise_resolved_event.wait()
+            else:
                 last_th.end_event.wait()
-            last_th.promise_resolved_event.wait()
             if last_th.state == 'fullfilled':
                 with next_th.mutex:
                     if next_th.state == "pending":
@@ -177,12 +205,13 @@ class thennable_thread(ThreadWithReturnValue):
                         
             else: #caught error
                 next_th.reject_reason = last_th.reject_reason
-                if last_th is not None:
-                    next_th._args = [last_th._error] + next_th._args
-                else:
-                    #may behave insert none here
-                    # nothing indicate it has no result no parent
-                    pass
+                if th_other.result_chainable:
+                    if last_th is not None:
+                        next_th._args = [last_th._error] + next_th._args
+                    else:
+                        #may behave insert none here
+                        # nothing indicate it has no result no parent
+                        pass
                 if next_th._started.is_set():
                     pass
                 else:
@@ -203,8 +232,11 @@ class thennable_thread(ThreadWithReturnValue):
         if th_final.chainnable:
             th_final.parent = self
         def await_start_next(last_th: "thennable_thread", next_th: "thennable_thread"):
-            last_th.end_event.wait()
-            last_th.promise_resolved_event.wait()
+            
+            if self.is_promise:
+                self.resolve_pred.promise_resolved_event.wait() # wait for siblings
+            else:
+                last_th.end_event.wait()
             if last_th.state == 'fullfilled':
                 self._return = last_th._return
             next_th.state = "fullfilled"
